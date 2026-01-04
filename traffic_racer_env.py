@@ -1,30 +1,11 @@
-import argparse
 import gymnasium as gym
 from gymnasium.envs.registration import register
-import numpy as np
-import time
 from highway_env import utils
 from highway_env.envs.two_way_env import TwoWayEnv
 from highway_env.road.lane import LineType, StraightLane
 from highway_env.road.road import Road, RoadNetwork
 
-# Config aliniat cu ppo.py (lanes_count este pe direcție în TwoWayEnv)
-ENV_CONFIG = {
-    "lanes_count": 4,
-    "vehicles_count": 25,
-    "duration": 40,
-    "controlled_vehicles": 1,
-    "ego_spacing": 2,
-    "collision_reward": -1.0,
-    "high_speed_reward": 0.4,
-    "right_lane_reward": 0.1,
-    "offroad_terminal": True,
-    "road_length": 800,
-    "screen_width": 1400,
-    "screen_height": 800,
-    "scaling": 30,
-    "centering_position": [0.35, 0.55],
-}
+from env_config import ENV_CONFIG
 
 
 class TwoWay4LaneEnv(TwoWayEnv):
@@ -127,36 +108,16 @@ class TwoWay4LaneEnv(TwoWayEnv):
         return s >= lane.length - 5.0
 
 
-# Înregistrare opțională pentru gym.make
+# Înregistrare pentru gym.make
 register(
-    id="two-way-4lane-local-v0",
+    id="two-way-4lane-v0",
     entry_point=TwoWay4LaneEnv,
 )
 
 
 def make_env(render_mode: str = "human") -> gym.Env:
-    """Helper ca în ppo.py pentru a crea env-ul cu config pre-set."""
-    return gym.make("two-way-4lane-local-v0", render_mode=render_mode, config=ENV_CONFIG)
+    """Helper pentru a crea env-ul cu config pre-set."""
+    return gym.make("two-way-4lane-v0", render_mode=render_mode, config=ENV_CONFIG)
 
 
-def rollout(env: gym.Env, steps: int = 500) -> None:
-    obs, info = env.reset()
-    for _ in range(steps):
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        if env.render_mode == "human":
-            env.render()
-            time.sleep(0.2)  # slow down vizualizarea
-        if terminated or truncated:
-            obs, info = env.reset()
-    env.close()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--no-render", action="store_true", help="Rulează fără randare")
-    args = parser.parse_args()
-
-    env = make_env(render_mode=None if args.no_render else "human")
-    env.metadata["render_fps"] = 30
-    rollout(env, steps=800)
+__all__ = ["TwoWay4LaneEnv", "make_env"]
