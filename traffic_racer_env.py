@@ -80,13 +80,18 @@ class TwoWay4LaneEnv(TwoWayEnv):
         
         potential_slots = []
         
-        # Sensul nostru (a->b) - start de la 60m ca să nu fie peste ego
-        for x in range(60, length, min_spacing):
+        # Sensul nostru (a->b) - start de la 80m ca să nu fie peste ego (ego e la 30m)
+        # Lăsăm un buffer rezonabil (30m -> 80m liber = 50m gap)
+        for x in range(80, length, min_spacing):
             for lane_idx in range(2):
                 potential_slots.append(("forward", lane_idx, x))
                 
-        # Sens opus (b->a)
+        # Sens opus (b->a) - start de la 0, dar filtrăm zona ego-ului
         for x in range(0, length, min_spacing):
+            # Dacă e în zona de siguranță a ego-ului (0-100m), nu punem pe contrasens
+            # ca să nu se sperie agentul sau să facă accident dacă intră pe contrasens imediat
+            if x < 100:
+                continue
             for lane_idx in range(2):
                 potential_slots.append(("oncoming", lane_idx, x))
                 
@@ -110,10 +115,10 @@ class TwoWay4LaneEnv(TwoWayEnv):
                 
             if direction == "forward":
                 lane = ("a", "b", lane_idx)
-                speed = 20.0 + 5.0 * self.np_random.normal()
+                speed = float(self.np_random.choice([15, 30, 45]))
             else:
                 lane = ("b", "a", lane_idx)
-                speed = 22.0 + 5.0 * self.np_random.normal()
+                speed = float(self.np_random.choice([15, 30, 45]))
                 
             v = vehicles_type(
                 road,
@@ -124,6 +129,9 @@ class TwoWay4LaneEnv(TwoWayEnv):
             )
             road.vehicles.append(v)
 
+    def step(self, action: int):
+        return super().step(action)
+
     def _rewards(self, action: int) -> dict:
         """Calculăm componentele reward-ului."""
         # Viteza normalizată (0 la 1)
@@ -133,6 +141,7 @@ class TwoWay4LaneEnv(TwoWayEnv):
             "collision_reward": float(self.vehicle.crashed),
             "high_speed_reward": np.clip(scaled_speed, 0, 1),
             "oncoming_lane_reward": float(self.vehicle.lane_index[2] >= 2),
+            "right_lane_reward": float(self.vehicle.lane_index[2] < 2), # Bonus pentru benzile 0 și 1 (sensul corect)
         }
 
     def _reward(self, action: int) -> float:

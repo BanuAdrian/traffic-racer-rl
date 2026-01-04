@@ -21,7 +21,7 @@ from env_config import ENV_CONFIG
 SPEED_BIN = 5.0
 MAX_SPEED_BINS = 10
 # Discretizare distanță față (m): 0=aproape, 1=mediu, 2=departe/liber
-DIST_BINS = [20, 50]  # praguri
+DIST_BINS = [40, 80]  # praguri marite pentru a permite franarea
 
 
 def discretize_state(env) -> Tuple[int, int, int, int, int]:
@@ -95,9 +95,19 @@ def discretize_state(env) -> Tuple[int, int, int, int, int]:
         for v in env.road.vehicles:
             if v is env.vehicle:
                 continue
-            # Check same lane logic as above but only forward
-            # Simplificare: verificăm doar dacă e exact pe lane_index-ul nostru
+            
+            # Verificăm dacă e pe aceeași bandă (inclusiv suprapunere contrasens)
+            is_same_lane = False
             if v.lane_index == env.vehicle.lane_index:
+                is_same_lane = True
+            # Suprapunere contrasens: Lane 2 <-> Oncoming 0
+            elif lane_idx == 2 and v.lane_index[0] == "b" and v.lane_index[1] == "a" and v.lane_index[2] == 0:
+                is_same_lane = True
+            # Suprapunere contrasens: Lane 3 <-> Oncoming 1
+            elif lane_idx == 3 and v.lane_index[0] == "b" and v.lane_index[1] == "a" and v.lane_index[2] == 1:
+                is_same_lane = True
+
+            if is_same_lane:
                 d = v.position[0] - ego_pos
                 if 0 < d < front_dist:
                     front_dist = d
@@ -146,34 +156,39 @@ def train_q_learning(episodes: int = 200, max_steps: int = 500, alpha: float = 0
     rewards = []
     epsilon = eps_start
 
-    for ep in range(episodes):
-        obs, info = env.reset()
-        state = discretize_state(env)
-        total_reward = 0.0
+    try:
+        for ep in range(episodes):
+            obs, info = env.reset()
+            state = discretize_state(env)
+            total_reward = 0.0
 
-        for t in range(max_steps):
-            action = epsilon_greedy(Q, state, epsilon)
-            obs, reward, terminated, truncated, info = env.step(action)
-            next_state = discretize_state(env)
+            for t in range(max_steps):
+                action = epsilon_greedy(Q, state, epsilon)
+                obs, reward, terminated, truncated, info = env.step(action)
+                next_state = discretize_state(env)
 
-            lane, spd, dst, lsafe, rsafe = state
-            nlane, nspd, ndst, nlsafe, nrsafe = next_state
-            best_next = np.max(Q[nlane, nspd, ndst, nlsafe, nrsafe])
-            td_target = reward + gamma * best_next * (0 if terminated or truncated else 1)
-            td_error = td_target - Q[lane, spd, dst, lsafe, rsafe, action]
-            Q[lane, spd, dst, lsafe, rsafe, action] += alpha * td_error
+                lane, spd, dst, lsafe, rsafe = state
+                nlane, nspd, ndst, nlsafe, nrsafe = next_state
+                best_next = np.max(Q[nlane, nspd, ndst, nlsafe, nrsafe])
+                td_target = reward + gamma * best_next * (0 if terminated or truncated else 1)
+                td_error = td_target - Q[lane, spd, dst, lsafe, rsafe, action]
+                Q[lane, spd, dst, lsafe, rsafe, action] += alpha * td_error
 
-            total_reward += reward
-            state = next_state
-            if terminated or truncated:
-                break
+                total_reward += reward
+                state = next_state
+                if terminated or truncated:
+                    break
 
-        rewards.append(total_reward)
-        epsilon = max(eps_end, epsilon * eps_decay)
-        print(f"Ep {ep + 1:04d} | eps={epsilon:.3f} | reward={total_reward:.2f}")
-        if (ep + 1) % 10 == 0:
-            avg_last = np.mean(rewards[-10:])
-            print(f"   >>> Avg Reward (last 10): {avg_last:.2f}")
+            rewards.append(total_reward)
+            epsilon = max(eps_end, epsilon * eps_decay)
+            print(f"Ep {ep + 1:04d} | eps={epsilon:.3f} | steps={t+1} | reward={total_reward:.2f}")
+            if (ep + 1) % 10 == 0:
+                avg_last = np.mean(rewards[-10:])
+                print(f"   >>> Avg Reward (last 10): {avg_last:.2f}")
+
+    except KeyboardInterrupt:
+        print("\n[!] Antrenament intrerupt de utilizator (CTRL+C).")
+        print("Se va salva modelul cu progresul actual...")
 
     env.close()
     return Q, rewards
@@ -231,7 +246,7 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.97, help="Discount factor")
     parser.add_argument("--eps-start", type=float, default=1.0, help="Epsilon inițial")
     parser.add_argument("--eps-end", type=float, default=0.05, help="Epsilon minim")
-    parser.add_argument("--eps-decay", type=float, default=0.999, help="Factor de decay pe episod")
+    parser.add_argument("--eps-decay", type=float, default=0.99, help="Factor de decay pe episod")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Episoade de evaluare după training")
     parser.add_argument("--eval-render", action="store_true", help="Randează în evaluare (lent)")
     parser.add_argument("--model-path", type=str, default="q_table.npy", help="Cale fisier model (.npy)")

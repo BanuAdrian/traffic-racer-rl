@@ -7,8 +7,9 @@ ENV_CONFIG = {
     "duration": 40,
     "controlled_vehicles": 1,
     "ego_spacing": 2,
-    "collision_reward": -5.0,
+    "collision_reward": -20.0,
     "high_speed_reward": 0.5,
+    "right_lane_reward": 0.1,
     "reward_speed_range": [20, 45],
     "oncoming_lane_reward": 2.0, # Reward mare pentru mers pe contrasens
     "offroad_terminal": True,
@@ -27,6 +28,6 @@ ENV_CONFIG = {
         # Viteze țintă explicite (m/s): 0, 15, 30, 45. Pași mari (15 m/s ~ 54 km/h)
         "target_speeds": [0, 15, 30, 45],
     },
-    "simulation_frequency": 15,  # Mai puțini pași pe secundă -> acțiuni mai "mari" per pas
-    "policy_frequency": 1,
+    "simulation_frequency": 10,  # Mai puțini pași de fizică (era 15)
+    "policy_frequency": 5,       # 5 acțiuni pe secundă (era 1) -> step() mult mai rapid
 }
