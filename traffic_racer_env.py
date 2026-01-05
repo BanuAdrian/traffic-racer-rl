@@ -59,89 +59,223 @@ class TwoWay4LaneEnv(TwoWayEnv):
 
     def _make_vehicles(self) -> None:  # type: ignore[override]
         road = self.road
-        length = self.config.get("road_length", 2000)
-        vehicles_count = self.config.get("vehicles_count", 50)
+        length = self.config.get("road_length", 1500)
+        vehicles_count = self.config.get("vehicles_count", 80)
         vehicles_type = utils.class_from_path(self.config["other_vehicles_type"])
 
-        # Ego pe lane 1 (a->b, banda rapidă forward)
+        # 1. Creăm EGO (Agentul)
+        # Îl punem pe banda 1 (interior) sau 0 (exterior)
+        ego_lane_idx = 1
         ego_vehicle = self.action_type.vehicle_class(
-            road, road.network.get_lane(("a", "b", 1)).position(30.0, 0.0), speed=30.0
+            road, 
+            road.network.get_lane(("a", "b", ego_lane_idx)).position(30.0, 0.0), 
+            speed=self.config.get("ego_init_speed", 20.0)
         )
-        # Asigură-te că ego nu e controlat manual dacă config-ul zice nu
         road.vehicles.append(ego_vehicle)
         self.vehicle = ego_vehicle
 
         if vehicles_count <= 0:
             return
 
-        # Generăm toate sloturile posibile pentru a evita coliziunile la spawn
-        # Distanța minimă între mașini (buffer)
-        min_spacing = 25 
+        # 2. Generăm Trafic NPC (Non-Uniform)
+        # Nu mai folosim spacing fix. Încercăm să punem mașini random.
         
-        potential_slots = []
+        spawned_count = 0
+        attempts = 0
+        max_attempts = vehicles_count * 5  # Evităm bucla infinită dacă e drumul plin
         
-        # Sensul nostru (a->b) - start de la 80m ca să nu fie peste ego (ego e la 30m)
-        # Lăsăm un buffer rezonabil (30m -> 80m liber = 50m gap)
-        for x in range(80, length, min_spacing):
-            for lane_idx in range(2):
-                potential_slots.append(("forward", lane_idx, x))
-                
-        # Sens opus (b->a) - start de la 0, dar filtrăm zona ego-ului
-        for x in range(0, length, min_spacing):
-            # Dacă e în zona de siguranță a ego-ului (0-100m), nu punem pe contrasens
-            # ca să nu se sperie agentul sau să facă accident dacă intră pe contrasens imediat
-            if x < 100:
-                continue
-            for lane_idx in range(2):
-                potential_slots.append(("oncoming", lane_idx, x))
-                
-        # Amestecăm sloturile și alegem primele vehicles_count
-        # Folosim np_random pentru reproductibilitate
-        # Convertim la listă de indici pentru a putea face shuffle
-        indices = np.arange(len(potential_slots))
-        self.np_random.shuffle(indices)
-        
-        # Luăm doar câte avem nevoie
-        indices = indices[:vehicles_count]
-        
-        for i in indices:
-            direction, lane_idx, x_pos = potential_slots[i]
+        min_spacing = 15.0 # Distanța minimă între mașini (buffer de siguranță la spawn)
+
+        while spawned_count < vehicles_count and attempts < max_attempts:
+            attempts += 1
             
-            # Adăugăm puțin zgomot la poziție
-            noise = self.np_random.uniform(-5, 5)
-            pos = x_pos + noise
-            if pos < 0 or pos >= length:
-                continue
-                
-            if direction == "forward":
-                lane = ("a", "b", lane_idx)
-                speed = float(self.np_random.choice([15, 30, 45]))
+            # Alege o poziție random pe tot drumul (după zona de start a agentului)
+            x_pos = self.np_random.uniform(50, length - 20)
+            
+            # Alege o bandă random (0-3)
+            if self.np_random.random() < 0.70: 
+                # 70% șansă: Alegem benzile 0 sau 1 (Sensul Nostru)
+                lane_choice = self.np_random.integers(0, 2)
             else:
-                lane = ("b", "a", lane_idx)
-                speed = float(self.np_random.choice([15, 30, 45]))
+                # 30% șansă: Alegem benzile 2 sau 3 (Contrasens)
+                lane_choice = self.np_random.integers(2, 4)
+            
+            # Determinăm ID-ul benzii corecte în funcție de sens
+            if lane_choice == 0: lane_id = ("a", "b", 0)
+            elif lane_choice == 1: lane_id = ("a", "b", 1)
+            elif lane_choice == 2: lane_id = ("b", "a", 0)
+            else: lane_id = ("b", "a", 1)
+            
+            # --- SAFETY CHECK ---
+            # Verificăm dacă locul e liber. Nu vrem spawn kills.
+            is_safe = True
+            for v in road.vehicles:
+                # Verificăm doar mașinile de pe același sens/bandă logică
+                # Atenție: lane_index e complex ("a", "b", 0). Verificăm tot tuplul sau doar indexul final?
+                # Cel mai sigur: distanța Euclidiană. Dacă e vreo mașină prea aproape pe X și Y, skip.
                 
-            v = vehicles_type(
-                road,
-                position=road.network.get_lane(lane).position(pos, 0.0),
-                heading=road.network.get_lane(lane).heading_at(pos),
-                speed=speed,
-                enable_lane_change=False,
-            )
-            road.vehicles.append(v)
+                # Coordonatele propuse
+                proposed_lane = road.network.get_lane(lane_id)
+                proposed_pos = proposed_lane.position(x_pos, 0.0)
+                
+                # Distanța față de mașina existentă v
+                dx = abs(v.position[0] - proposed_pos[0])
+                dy = abs(v.position[1] - proposed_pos[1])
+                
+                # Dacă e pe aceeași bandă (dy mic) și prea aproape (dx mic)
+                if dy < 2.0 and dx < min_spacing:
+                    is_safe = False
+                    break
+            
+            if is_safe:
+                # Setăm viteza
+                # Putem varia viteza puțin pentru realism
+                base_speed = self.config.get("other_vehicles_speed", 20.0)
+                speed = self.np_random.uniform(base_speed * 0.9, base_speed * 1.1)
+                
+                try:
+                    lane_obj = road.network.get_lane(lane_id)
+                    heading = lane_obj.heading_at(x_pos)
+                    
+                    v = vehicles_type(
+                        road,
+                        position=lane_obj.position(x_pos, 0.0),
+                        heading=heading,
+                        speed=speed,
+                        enable_lane_change=False, # Traficul ține banda (mai sigur pt început)
+                    )
+                    road.vehicles.append(v)
+                    spawned_count += 1
+                except Exception:
+                    pass # Ignorăm erori rare de geometrie
+
+        self.last_step_overtaken = 0
+        self.last_step_oncoming_passed = 0  # <--- INIȚIALIZARE NOUĂ
 
     def step(self, action: int):
-        return super().step(action)
+        # 1. Identificăm cine e în față ÎNAINTE de mișcare
+        
+        # A. Cei pe sensul nostru (pentru depășire normală)
+        vehicles_in_front = [
+            v for v in self.road.vehicles 
+            if v is not self.vehicle 
+            and v.position[0] > self.vehicle.position[0]
+            and v.lane_index[0] == "a"  # Sensul a->b
+        ]
+        
+        # B. Cei de pe CONTRASENS (pentru Near Miss)
+        oncoming_in_front = [
+            v for v in self.road.vehicles
+            if v is not self.vehicle
+            and v.position[0] > self.vehicle.position[0]
+            and v.lane_index[0] == "b"  # Sensul b->a (VIN DIN FAȚĂ)
+        ]
+        
+        # 2. Executăm pasul fizic
+        result = super().step(action)
+        
+        # 3. Verificăm cine a ajuns în spate DUPĂ mișcare
+        
+        # Calcul depășiri normale
+        overtaken = 0
+        for v in vehicles_in_front:
+            if v.position[0] < self.vehicle.position[0]:
+                overtaken += 1
+        self.last_step_overtaken = overtaken
+        
+        # Calcul treceri pe lângă contrasens (Near Miss)
+        oncoming_passed = 0
+        for v in oncoming_in_front:
+            if v.position[0] < self.vehicle.position[0]:
+                oncoming_passed += 1
+        self.last_step_oncoming_passed = oncoming_passed
+        
+        return result
 
     def _rewards(self, action: int) -> dict:
-        """Calculăm componentele reward-ului."""
-        # Viteza normalizată (0 la 1)
-        scaled_speed = utils.lmap(self.vehicle.speed, self.config["reward_speed_range"], [0, 1])
+        """
+        Mixul Final:
+        1. Viteză Pătratică (dependență de viteză maximă)
+        2. Depășire Heroică (Bonus masiv pe contrasens)
+        3. Clear Path (Anticipare trafic)
+        """
         
+        # --- 1. VITEZA PĂTRATICĂ ---
+        # 25 m/s = 1.0 puncte
+        # 20 m/s = 0.64 puncte
+        # 10 m/s = 0.16 puncte
+        # Asta elimină nevoia de "low_speed_penalty".
+        max_speed = 25.0
+        current_speed = self.vehicle.speed
+        speed_reward = (current_speed / max_speed) ** 2
+        
+        # 1. Detectare dacă suntem pe contrasens
+        current_lane_idx = 0
+        try: current_lane_idx = self.vehicle.lane_index[2]
+        except: pass
+        
+        # Ești pe contrasens dacă indexul e 2 sau 3
+        is_oncoming_lane = 1.0 if current_lane_idx >= 2 else 0.0
+
+        # --- LOGICA DE REWARD PENTRU INTERACȚIUNI ---
+        
+        # 1. Depășire Normală (Sensul meu)
+        overtaken_count = float(self.last_step_overtaken)
+        normal_overtake = 0.0
+        hero_overtake = 0.0
+        
+        if overtaken_count > 0:
+            if is_oncoming_lane:
+                hero_overtake = overtaken_count # Depășesc stând pe contrasens (Foarte periculos!)
+            else:
+                normal_overtake = overtaken_count # Depășesc normal
+        
+        # --- MODIFICAREA AICI ---
+        # 2. Near Miss (Trecere pe lângă trafic din față)
+        raw_near_miss_count = float(self.last_step_oncoming_passed)
+        final_near_miss_reward = 0.0
+        
+        # Condiția: Primești puncte DOAR dacă ești tu pe contrasens
+        # în momentul în care treci pe lângă ei.
+        if is_oncoming_lane > 0:
+            final_near_miss_reward = raw_near_miss_count
+
+        # --- 3. CLEAR PATH (Ochii din față) ---
+        # Verificăm dacă avem drum liber pe 60m în față pe banda curentă
+        clear_path = 0.0
+        min_front_dist = 200.0
+        
+        if self.road:
+            for v in self.road.vehicles:
+                if v is self.vehicle: continue
+                try: v_lane = v.lane_index[2]
+                except: continue
+                
+                # Dacă e pe banda mea și în față
+                if v_lane == current_lane_idx:
+                    d = v.position[0] - self.vehicle.position[0]
+                    if 0 < d < min_front_dist:
+                        min_front_dist = d
+        
+        # Dacă am > 60m liberi, primesc un mic bonus constant
+        if min_front_dist > 60.0:
+            clear_path = 1.0
+
+        # --- 4. LANE CHANGE ---
+        lane_change = 1.0 if action in [0, 2] else 0.0
+
         return {
             "collision_reward": float(self.vehicle.crashed),
-            "high_speed_reward": np.clip(scaled_speed, 0, 1),
-            "oncoming_lane_reward": float(self.vehicle.lane_index[2] >= 2),
-            "right_lane_reward": float(self.vehicle.lane_index[2] < 2), # Bonus pentru benzile 0 și 1 (sensul corect)
+            "high_speed_reward": (self.vehicle.speed / 25.0) ** 2,
+            "oncoming_lane_reward": is_oncoming_lane,
+            "lane_change_reward": lane_change,
+            "clear_path_reward": clear_path,
+            
+            "overtaking_reward": normal_overtake,
+            "oncoming_overtake_reward": hero_overtake,
+            
+            # Folosim variabila filtrată
+            "near_miss_reward": final_near_miss_reward, 
         }
 
     def _reward(self, action: int) -> float:
@@ -156,10 +290,18 @@ class TwoWay4LaneEnv(TwoWayEnv):
         return reward
 
     def _is_truncated(self) -> bool:  # type: ignore[override]
-        # Episodul se termină când ego ajunge aproape de capătul benzii.
+        # Episodul se termină când ego ajunge aproape de capătul benzii SAU timpul a expirat.
         lane = self.vehicle.lane
         s, _ = lane.local_coordinates(self.vehicle.position)
-        return s >= lane.length - 5.0
+        road_end = s >= lane.length - 5.0
+        time_out = self.time >= self.config.get("duration", 40)
+        
+        if road_end:
+            print(f"\n[Env] Truncated: Road End reached (s={s:.1f}/{lane.length})")
+        elif time_out:
+            print(f"\n[Env] Truncated: Time Out (t={self.time:.1f}/{self.config.get('duration', 40)})")
+            
+        return road_end or time_out
 
 
 # Înregistrare pentru gym.make
