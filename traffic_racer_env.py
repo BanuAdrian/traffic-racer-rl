@@ -174,7 +174,22 @@ class TwoWay4LaneEnv(TwoWayEnv):
         # 2. Executăm pasul fizic
         result = super().step(action)
         
-        # 3. Verificăm cine a ajuns în spate DUPĂ mișcare
+        # 3. --- CURĂȚENIE GENERALĂ (GARBAGE COLLECTOR) ---
+        road_len = self.config.get("road_length", 1500)
+        
+        # Iterăm printr-o COPIE a listei ([:] este crucial!)
+        # Nu putem șterge elemente dintr-o listă în timp ce iterăm prin original.
+        for v in self.road.vehicles[:]:
+            # Nu ștergem Ego-ul (Agentul)! El trebuie să ajungă la final ca să ia premiul.
+            if v is not self.vehicle:
+                # Ștergem mașinile care sunt în ultimii 10 metri de drum.
+                # Dacă drumul e 1500, ștergem tot ce trece de 1490.
+                # Astfel dispar ÎNAINTE să se oprească în zid.
+                if v.position[0] >= road_len - 10.0:
+                    # Îl scoatem din simulare -> Dispare instant
+                    self.road.vehicles.remove(v)
+                    
+        # 4. Verificăm cine a ajuns în spate DUPĂ mișcare
         
         # Calcul depășiri normale
         overtaken = 0
@@ -264,6 +279,26 @@ class TwoWay4LaneEnv(TwoWayEnv):
         # --- 4. LANE CHANGE ---
         lane_change = 1.0 if action in [0, 2] else 0.0
 
+        # --- LOGICA DE FINALIZARE ---
+        finish_bonus = 0.0
+        
+        road_len = self.config.get("road_length", 1000)
+        duration = self.config.get("duration", 40)
+        
+        # 1. Verificăm ROAD END (Victorie Totală)
+        # Am parcurs tot drumul -> Viteza a fost bună -> BONUS MARE
+        if self.vehicle.position[0] >= road_len - 10:
+            finish_bonus = 50.0  
+            
+        # 2. Verificăm TIME OUT (Supraviețuire)
+        # Nu am ajuns la capăt, dar timpul e pe sfârșite -> BONUS MEDIU
+        # self.time crește cu 1/FPS la fiecare pas.
+        # Verificăm dacă suntem în ultima secundă
+        elif self.time >= duration - (1.0 / self.config["simulation_frequency"]):
+            # Îi dăm puncte că a supraviețuit, dar mai puține decât dacă ajungea la capăt.
+            # Astfel, nu e tentat să meargă încet doar ca să treacă timpul.
+            finish_bonus = 20.0
+            
         return {
             "collision_reward": float(self.vehicle.crashed),
             "high_speed_reward": (self.vehicle.speed / 25.0) ** 2,
@@ -276,6 +311,7 @@ class TwoWay4LaneEnv(TwoWayEnv):
             
             # Folosim variabila filtrată
             "near_miss_reward": final_near_miss_reward, 
+            "finish_reward": finish_bonus
         }
 
     def _reward(self, action: int) -> float:

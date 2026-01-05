@@ -38,13 +38,14 @@ def main():
         
         total_reward = 0.0
         done = False
+        current_step = 0  # <--- MODIFICARE 1: Inițializare contor
         
-        # Luăm config-ul ca să știm cât valorează fiecare acțiune
         config = env.unwrapped.config
 
         while not done:
             obs, reward, terminated, truncated, info = env.step(env.action_space.sample()) 
             total_reward += reward
+            current_step += 1 # <--- MODIFICARE 2: Incrementare
             
             if hasattr(env.unwrapped, "vehicle") and env.unwrapped.vehicle:
                 ego = env.unwrapped.vehicle
@@ -62,19 +63,15 @@ def main():
                         except: pass
                 dist_str = f"{min_dist:.1f}m" if min_dist != float("inf") else "Free"
 
-                # --- 2. Reward-uri Reale (Cantitate * Preț) ---
+                # --- 2. Reward-uri ---
                 r_dict = env.unwrapped._rewards(1) 
                 
-                # Aici facem conversia: Cantitate (din dict) * Preț (din config)
                 hero_pts = r_dict.get('oncoming_overtake_reward', 0.0) * config.get("oncoming_overtake_reward", 0.0)
                 near_pts = r_dict.get('near_miss_reward', 0.0) * config.get("near_miss_reward", 0.0)
                 ovr_pts  = r_dict.get('overtaking_reward', 0.0) * config.get("overtaking_reward", 0.0)
                 path_pts = r_dict.get('clear_path_reward', 0.0) * config.get("clear_path_reward", 0.0)
-                
-                # La viteză calculul e mai complex, afișăm doar procentul (0.0 la 1.0)
                 spd_val  = r_dict.get('high_speed_reward', 0.0)
 
-                # Info bandă
                 try:
                     lane_idx = ego.lane_index[2]
                     lane_type = "ONC" if lane_idx >= 2 else "OK "
@@ -82,10 +79,11 @@ def main():
                     lane_idx = -1; lane_type = "???"
 
                 debug_str = (
-                    f"Score:{total_reward:.2f}|"
-                    f"HERO:{hero_pts:.0f}|"    # Ar trebui să afișeze 4 sau 0
-                    f"Near:{near_pts:.1f}|"    # Ar trebui să afișeze 0.5, 1.0 etc
-                    f"Ovr:{ovr_pts:.0f}|"      # 1 sau 0
+                    f"Step:{current_step:<3}|" # <--- MODIFICARE 3: Afișare Step
+                    f"Score:{total_reward:.1f}|" # Am redus la o zecimală pt spațiu
+                    f"HERO:{hero_pts:.0f}|"    
+                    f"Near:{near_pts:.1f}|"    
+                    f"Ovr:{ovr_pts:.0f}|"      
                     f"Path:{path_pts:.1f}|"
                     f"Spd:{spd_val:.2f}|"
                     f"L:{lane_idx}({lane_type})|"
@@ -95,9 +93,13 @@ def main():
 
             env.render()
             if terminated or truncated:
-                print(f"\n[Terminated] Final Score: {total_reward:.2f}. Resetare...")
+                # Verificăm motivul terminării
+                reason = "Time Out" if truncated else "Crash/Finish"
+                print(f"\n[Terminated: {reason}] la Step: {current_step}. Final Score: {total_reward:.2f}. Resetare...")
+                
                 env.reset()
                 total_reward = 0.0
+                current_step = 0 # <--- MODIFICARE 4: Resetare contor
     else:
         print(f"Env config manual_control: {env.unwrapped.config.get('manual_control')}")
         env.metadata["render_fps"] = 30
