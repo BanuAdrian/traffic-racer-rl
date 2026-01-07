@@ -21,7 +21,8 @@ MAX_SPEED_BINS = 3
 SIT_SAFE = 0
 SIT_CAUTION = 1
 SIT_DANGER = 2
-NUM_SITUATIONS = 3
+SIT_WALL = 3
+NUM_SITUATIONS = 4
 
 # Distances for situations
 DIST_DANGER_SAME = 30.0
@@ -33,9 +34,12 @@ LANE_WIDTH = 4.0
 
 def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed: float, ego_lane: int) -> int:
     """
-    Calculează situația (SAFE, CAUTION, DANGER) pentru o bandă specifică.
-    Ia în considerare distanța și viteza relativă față de cea mai apropiată mașină din față.
+    Calculează situația (SAFE, CAUTION, DANGER, WALL) pentru o bandă specifică.
     """
+    # 0. Wall Check
+    if lane_idx_check < 0 or lane_idx_check > 3:
+        return SIT_WALL
+
     closest_dist = 200.0
     closest_v = None
     
@@ -71,7 +75,7 @@ def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed:
             # Determinăm limita de căutare în spate
             # Pentru banda curentă: ne interesează doar ce e în față (sau foarte puțin suprapus)
             # Pentru alte benzi: ne interesează și ce e în "unghiul mort" sau lateral (-20m)
-            search_behind_dist = -10.0 if lane_idx_check != ego_lane else -2.0
+            search_behind_dist = -20.0 if lane_idx_check != ego_lane else -2.0
             
             if d_raw > search_behind_dist and d_raw < closest_dist:
                 closest_dist = d_raw
@@ -109,10 +113,10 @@ def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed:
             return SIT_SAFE
 
 
-def discretize_state(env) -> Tuple[int, int, int, int, int, int]:
+def discretize_state(env) -> Tuple[int, int, int, int, int]:
     """
     Mapează starea la o tuplă discretă:
-    (lane_idx, speed_bin, sit_l0, sit_l1, sit_l2, sit_l3)
+    (lane_idx, speed_bin, sit_left, sit_center, sit_right)
     """
     # 1. Lane index (0-3)
     lane_idx = 0
@@ -128,22 +132,21 @@ def discretize_state(env) -> Tuple[int, int, int, int, int, int]:
     speed_bin = int(math.floor((speed - 0.01) / SPEED_BIN))
     speed_bin = max(0, min(MAX_SPEED_BINS - 1, speed_bin))
 
-    # 3. Situations per lane
+    # 3. Relative Situations
     ego_pos = env.vehicle.position
     
-    sit_l0 = get_lane_situation(env, 0, ego_pos, speed, lane_idx)
-    sit_l1 = get_lane_situation(env, 1, ego_pos, speed, lane_idx)
-    sit_l2 = get_lane_situation(env, 2, ego_pos, speed, lane_idx)
-    sit_l3 = get_lane_situation(env, 3, ego_pos, speed, lane_idx)
+    sit_left = get_lane_situation(env, lane_idx - 1, ego_pos, speed, lane_idx)
+    sit_center = get_lane_situation(env, lane_idx, ego_pos, speed, lane_idx)
+    sit_right = get_lane_situation(env, lane_idx + 1, ego_pos, speed, lane_idx)
 
-    return (lane_idx, speed_bin, sit_l0, sit_l1, sit_l2, sit_l3)
+    return (lane_idx, speed_bin, sit_left, sit_center, sit_right)
 
 
-def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int, int], epsilon: float) -> int:
+def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int], epsilon: float) -> int:
     if random.random() < epsilon:
         return random.randrange(Q.shape[-1])
-    lane, spd, s0, s1, s2, s3 = state
-    return int(np.argmax(Q[lane, spd, s0, s1, s2, s3]))
+    lane, spd, sl, sc, sr = state
+    return int(np.argmax(Q[lane, spd, sl, sc, sr]))
 
 
 def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 0.2, gamma: float = 0.99,
@@ -160,12 +163,12 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
         print(f"[INFO] Q-Table încărcat: {Q.shape}")
     else:
         # OPTIMISTIC INITIALIZATION
-        # Shape: (4, 3, 3, 3, 3, 3, 5)
-        # (lane, speed, sit0, sit1, sit2, sit3, action)
-        Q = np.ones((lanes, MAX_SPEED_BINS, NUM_SITUATIONS, NUM_SITUATIONS, NUM_SITUATIONS, NUM_SITUATIONS, n_actions), dtype=np.float32) * 5.0
+        # Shape: (4, 3, 4, 4, 4, 5)
+        # (lane, speed, sit_left, sit_center, sit_right, action)
+        Q = np.ones((lanes, MAX_SPEED_BINS, NUM_SITUATIONS, NUM_SITUATIONS, NUM_SITUATIONS, n_actions), dtype=np.float32) * 5.0
         # Acțiunile de lane change primesc bonus inițial
-        Q[:, :, :, :, :, :, 0] = 8.0  # LANE_LEFT
-        Q[:, :, :, :, :, :, 2] = 8.0  # LANE_RIGHT
+        Q[:, :, :, :, :, 0] = 8.0  # LANE_LEFT
+        Q[:, :, :, :, :, 2] = 8.0  # LANE_RIGHT
 
     rewards = []
     lane_changes_per_ep = []  # Track lane changes
@@ -192,13 +195,13 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
                     lane_changes += 1
                     prev_lane = next_state[0]
 
-                l, s, s0, s1, s2, s3 = state
-                nl, ns, ns0, ns1, ns2, ns3 = next_state
+                l, s, sl, sc, sr = state
+                nl, ns, nsl, nsc, nsr = next_state
                 
-                best_next = np.max(Q[nl, ns, ns0, ns1, ns2, ns3])
+                best_next = np.max(Q[nl, ns, nsl, nsc, nsr])
                 td_target = reward + gamma * best_next * (0 if terminated or truncated else 1)
-                td_error = td_target - Q[l, s, s0, s1, s2, s3, action]
-                Q[l, s, s0, s1, s2, s3, action] += alpha * td_error
+                td_error = td_target - Q[l, s, sl, sc, sr, action]
+                Q[l, s, sl, sc, sr, action] += alpha * td_error
 
                 total_reward += reward
                 state = next_state
