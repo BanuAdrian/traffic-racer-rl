@@ -13,127 +13,105 @@ import numpy as np
 from traffic_racer_env import make_env
 from env_config import ENV_CONFIG
 
-# --- CONSTANTE PENTRU DISCRETIZARE (SIMPLIFICAT) ---
-# State space redus: 4×3×3×2×2×2 = 288 stări (era 1152)
-SPEED_BIN = 5.0       # Bin de 5 m/s: [0-5), [5-10), [10-15+]
-MAX_SPEED_BINS = 3    # 3 bins: slow/medium/fast
-DIST_BINS = [15, 40]  # 3 bins: close(<15m), medium(<40m), far(40m+)
-REL_SPEED_APPROACHING = 2.0  # Prag: ne apropiem dacă rel_speed > 2
+# --- CONSTANTE PENTRU DISCRETIZARE ---
+SPEED_BIN = 5.0
+MAX_SPEED_BINS = 3
+# Praguri pentru SENS NORMAL
+DIST_BINS_NORMAL = [15, 40]
+# Praguri pentru CONTRASENS (mult mai defensive, vitezele se cumulează)
+DIST_BINS_ONCOMING = [50, 100]
+REL_SPEED_APPROACHING = 0.1  # Prag redus pentru a fi mai sensibil
+# Zonă de pericol [-40m în spate, +20m în față] pentru schimb de bandă
+ADJACENT_DANGER_ZONE = [-40, 20]
+LANE_WIDTH = 4.0  # Lățimea standard a unei benzi
 
-def discretize_state(env) -> Tuple[int, int, int, int, int, int]:
-    """Mapează starea la (lane_idx, speed_bin, dist_bin, rel_speed_bin, left_safe, right_safe)."""
-    
+
+def discretize_state(env) -> Tuple[int, int, int, int, int]:
+    """
+    Mapează starea la o tuplă discretă:
+    (lane_idx, speed_bin, situation, left_safe, right_safe)
+    """
     # 1. Lane index (0-3)
     lane_idx = 0
     if hasattr(env, "vehicle") and getattr(env.vehicle, "lane_index", None):
-        try: lane_idx = int(env.vehicle.lane_index[2])
-        except Exception: lane_idx = 0
+        try:
+            lane_idx = int(env.vehicle.lane_index[2])
+        except Exception:
+            lane_idx = 0
     lane_idx = max(0, min(int(ENV_CONFIG.get("lanes_count", 4)) - 1, lane_idx))
 
-    # 2. Speed bin (0-5) - ajustat pentru viteze 5-15
+    # 2. Speed bin (0-2)
     speed = float(getattr(env.vehicle, "speed", 0.0))
-    speed_bin = int(math.floor(speed / SPEED_BIN))
+    speed_bin = int(math.floor((speed - 0.01) / SPEED_BIN))
     speed_bin = max(0, min(MAX_SPEED_BINS - 1, speed_bin))
 
-    # --- Analiză Frontală & Safety ---
+    # --- Analiză Frontală & Laterală ---
     front_dist = 200.0
     rel_speed = 0.0
     
-    # Distanțe minime pentru benzile adiacente
-    left_min_d = 200.0
-    right_min_d = 200.0
-    
-    ego_pos = env.vehicle.position[0]
-    ego_y = env.vehicle.position[1]
-    
+    # Boundary checks
+    left_safe = 0 if lane_idx == 0 else 1
+    right_safe = 0 if lane_idx == 3 else 1
+
+    ego_pos = env.vehicle.position
+
     if hasattr(env, "road") and env.road:
         for v in env.road.vehicles:
-            if v is env.vehicle: continue
+            if v is env.vehicle:
+                continue
+            d_raw = v.position[0] - ego_pos[0]
+            y_dist = v.position[1] - ego_pos[1]
+            abs_y_dist = abs(y_dist)
+            # LEFT SAFE: caut mașini pe stânga (y > ego), la distanță laterală de o bandă
+            if lane_idx < 3 and y_dist > 0.5 * LANE_WIDTH:
+                if abs_y_dist < LANE_WIDTH * 1.8 and ADJACENT_DANGER_ZONE[0] < d_raw < ADJACENT_DANGER_ZONE[1]:
+                    left_safe = 0
+            # RIGHT SAFE: caut mașini pe dreapta (y < ego), la distanță laterală de o bandă
+            if lane_idx > 0 and y_dist < -0.5 * LANE_WIDTH:
+                if abs_y_dist < LANE_WIDTH * 1.8 and ADJACENT_DANGER_ZONE[0] < d_raw < ADJACENT_DANGER_ZONE[1]:
+                    right_safe = 0
             
-            # Folosim poziția reală X a vehiculului (nu coordonata de bandă)
-            v_x = v.position[0]
-            v_y = v.position[1]
-            
-            try:
-                v_lane_idx = v.lane_index[2]
-            except: continue
-            
-            d_raw = v_x - ego_pos  # Distanța longitudinală
-            d_abs = abs(d_raw)
-            
-            # --- BLIND SPOT CHECK ---
-            # Dacă e paralel (<10m), distanța devine 0 (pericol total)
-            is_parallel = (d_abs < 10.0)
+            # B. Verificare frontală (mașina din față)
+            is_on_same_lane = False
+            if v.lane_index[0] == "a" and v.lane_index[2] == lane_idx:
+                is_on_same_lane = True
+            elif v.lane_index[0] == "b" and lane_idx >= 2:
+                mapped_oncoming_idx = lane_idx - 2
+                if v.lane_index[2] == mapped_oncoming_idx:
+                    is_on_same_lane = True
 
-            # 1. Front Check - mașini pe aceeași bandă SAU pe benzile de contrasens dacă suntem acolo
-            if v_lane_idx == lane_idx:
-                if 0 < d_raw < front_dist:
+            if is_on_same_lane and d_raw > 0:
+                if d_raw < front_dist:
                     front_dist = d_raw
-                    rel_speed = env.vehicle.speed - v.speed
+                    if v.lane_index[0] == "a":
+                        rel_speed = env.vehicle.speed - v.speed
+                    else:
+                        rel_speed = env.vehicle.speed + v.speed
 
-            # 2. Left Check (bandă cu index mai mare)
-            elif v_lane_idx == lane_idx + 1:
-                if d_abs < left_min_d: left_min_d = d_abs
-                if is_parallel: left_min_d = 0.0
+    # 3. Situation Binning (combină distanța și viteza relativă) - CORECTAT
+    dist_bins = DIST_BINS_ONCOMING if lane_idx >= 2 else DIST_BINS_NORMAL
+    situation = 0  # Default: FREE
+    if front_dist < dist_bins[0]:
+        situation = 3  # DANGER
+    elif front_dist < dist_bins[1]:
+        # Pe contrasens, nu există "following", e mereu "approaching"
+        if lane_idx >= 2:
+            situation = 1
+        else:
+            if rel_speed > REL_SPEED_APPROACHING:
+                situation = 1  # APPROACHING
+            else:
+                situation = 2  # FOLLOWING
 
-            # 3. Right Check (bandă cu index mai mic)
-            elif v_lane_idx == lane_idx - 1:
-                if d_abs < right_min_d: right_min_d = d_abs
-                if is_parallel: right_min_d = 0.0
-            
-            # 4. CONTRASENS CHECK - dacă suntem pe banda 2 sau 3
-            # Verificăm mașinile care vin din față pe contrasens
-            if lane_idx >= 2:  # Suntem pe contrasens
-                # Mașinile din contrasens vin spre noi (au lane_index[0] == "b")
-                try:
-                    if v.lane_index[0] == "b" and v_lane_idx == lane_idx:
-                        # Mașină din contrasens pe aceeași bandă - PERICOL!
-                        if v_x > ego_pos:  # E în fața noastră
-                            # Distanța se reduce rapid (viteze combinate)
-                            combined_approach = env.vehicle.speed + v.speed
-                            effective_dist = d_raw
-                            if effective_dist < front_dist:
-                                front_dist = effective_dist
-                                rel_speed = combined_approach  # Viteza de apropiere
-                except: pass
-
-    # 3. Distance Binning - SIMPLIFICAT la 3 bins
-    dist_bin = 2  # Default: departe / liber (40m+)
-    if front_dist < DIST_BINS[0]: dist_bin = 0  # PERICOL (<15m)
-    elif front_dist < DIST_BINS[1]: dist_bin = 1  # Mediu (<40m)
-
-    # 4. Relative Speed Binning - SIMPLIFICAT la 2 bins
-    # 0 = nu ne apropiem (sau încet), 1 = ne apropiem rapid
-    rs_bin = 1 if rel_speed > REL_SPEED_APPROACHING else 0
-
-    # 5 & 6. Dynamic Safety Checks
-    # Left - verificăm dacă putem merge pe banda din stânga
-    target_left = lane_idx + 1
-    if target_left > 3:
-        left_safe = 0  # Nu există bandă
-    else:
-        is_oncoming = (target_left >= 2)
-        # Contrasens cere 80m liberi, Sens normal cere 15m
-        req_dist = 80.0 if is_oncoming else 15.0
-        left_safe = 1 if left_min_d > req_dist else 0
-        
-    # Right - verificăm dacă putem merge pe banda din dreapta
-    target_right = lane_idx - 1
-    if target_right < 0:
-        right_safe = 0  # Nu există bandă
-    else:
-        is_oncoming = (target_right >= 2)
-        req_dist = 80.0 if is_oncoming else 15.0
-        right_safe = 1 if right_min_d > req_dist else 0
-
-    return (lane_idx, speed_bin, dist_bin, rs_bin, left_safe, right_safe)
+    return (lane_idx, speed_bin, situation, left_safe, right_safe)
 
 
-def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int, int], epsilon: float) -> int:
+
+def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int], epsilon: float) -> int:
     if random.random() < epsilon:
         return random.randrange(Q.shape[-1])
-    lane, spd, dst, rspd, lsafe, rsafe = state
-    return int(np.argmax(Q[lane, spd, dst, rspd, lsafe, rsafe]))
+    lane, spd, sit, lsafe, rsafe = state
+    return int(np.argmax(Q[lane, spd, sit, lsafe, rsafe]))
 
 
 def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 0.2, gamma: float = 0.99,
@@ -159,10 +137,10 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
         # OPTIMISTIC INITIALIZATION - pornește cu valori pozitive!
         # Asta forțează agentul să exploreze toate acțiunile cel puțin o dată
         # pentru că crede că fiecare acțiune e bună până învață contrariul
-        Q = np.ones((lanes, MAX_SPEED_BINS, 3, 2, 2, 2, n_actions), dtype=np.float32) * 5.0
+        Q = np.ones((lanes, MAX_SPEED_BINS, 4, 2, 2, n_actions), dtype=np.float32) * 5.0
         # Acțiunile de lane change (0=left, 2=right) primesc bonus inițial
-        Q[:, :, :, :, :, :, 0] = 8.0  # LANE_LEFT - bonus mare inițial
-        Q[:, :, :, :, :, :, 2] = 8.0  # LANE_RIGHT - bonus mare inițial
+        Q[:, :, :, :, :, 0] = 8.0  # LANE_LEFT - bonus mare inițial
+        Q[:, :, :, :, :, 2] = 8.0  # LANE_RIGHT - bonus mare inițial
 
     rewards = []
     lane_changes_per_ep = []  # Track lane changes
@@ -189,13 +167,13 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
                     lane_changes += 1
                     prev_lane = next_state[0]
 
-                l, s, d, rs, ls, rsf = state
-                nl, ns, nd, nrs, nls, nrsf = next_state
+                l, s, sit, ls, rsf = state
+                nl, ns, nsit, nls, nrsf = next_state
                 
-                best_next = np.max(Q[nl, ns, nd, nrs, nls, nrsf])
+                best_next = np.max(Q[nl, ns, nsit, nls, nrsf])
                 td_target = reward + gamma * best_next * (0 if terminated or truncated else 1)
-                td_error = td_target - Q[l, s, d, rs, ls, rsf, action]
-                Q[l, s, d, rs, ls, rsf, action] += alpha * td_error
+                td_error = td_target - Q[l, s, sit, ls, rsf, action]
+                Q[l, s, sit, ls, rsf, action] += alpha * td_error
 
                 total_reward += reward
                 state = next_state

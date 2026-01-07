@@ -2,9 +2,11 @@
 
 import argparse
 import time
+import math
 from collections import deque
 
 from traffic_racer_env import make_env
+from q_learning import discretize_state
 
 # Buffer pentru smoothing distanță (medie mobilă pe ultimele N valori)
 DIST_BUFFER_SIZE = 10
@@ -129,8 +131,10 @@ def main():
                 line2 = "Rewards: " + " | ".join(rewards_parts) if rewards_parts else "Rewards: (none)"
                 
                 # Afișăm pe două linii
-                print(f"\r{line1}" + " " * 20)
-                print(f"\r{line2}" + " " * 40, end="")
+                disc = discretize_state(env.unwrapped)
+                # Afișează totul pe o singură linie, cu padding și \r
+                print(f"\r{line1} | Disc:{disc}    ", end="")
+                print(f"\n{line2}" + " " * 40, end="")
                 print("\033[F", end="")  # Mută cursorul însus cu o linie
 
             env.render()
