@@ -136,10 +136,17 @@ def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int, int], ep
     return int(np.argmax(Q[lane, spd, dst, rspd, lsafe, rsafe]))
 
 
-def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 0.1, gamma: float = 0.97,
-                     eps_start: float = 1.0, eps_end: float = 0.05, eps_decay: float = 0.995,
+def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 0.2, gamma: float = 0.99,
+                     eps_start: float = 1.0, eps_end: float = 0.05, eps_decay: float = 0.997,
                      Q_init: np.ndarray = None):
-    """Antrenare Q-learning. max_steps mărit pentru a permite finalizarea traseului."""
+    """Antrenare Q-learning îmbunătățit.
+    
+    Îmbunătățiri față de versiunea de bază:
+    - alpha=0.2: Learning rate mai mare pentru convergență rapidă
+    - gamma=0.99: Discount mai mare pentru a considera recompensele viitoare
+    - eps_decay=0.997: Explorare mai lungă (ajunge la 0.05 după ~1000 ep)
+    - Optimistic initialization: Q-values pornesc de la +5 pentru a încuraja explorarea
+    """
     env = make_env(render_mode=None)
     n_actions = env.action_space.n
     lanes = int(ENV_CONFIG.get("lanes_count", 4))
@@ -149,23 +156,38 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
         Q = Q_init
         print(f"[INFO] Q-Table încărcat: {Q.shape}")
     else:
-        # State space SIMPLIFICAT: lanes(4) × speed(3) × dist(3) × rel_speed(2) × left(2) × right(2) = 288
-        Q = np.zeros((lanes, MAX_SPEED_BINS, 3, 2, 2, 2, n_actions), dtype=np.float32)
+        # OPTIMISTIC INITIALIZATION - pornește cu valori pozitive!
+        # Asta forțează agentul să exploreze toate acțiunile cel puțin o dată
+        # pentru că crede că fiecare acțiune e bună până învață contrariul
+        Q = np.ones((lanes, MAX_SPEED_BINS, 3, 2, 2, 2, n_actions), dtype=np.float32) * 5.0
+        # Acțiunile de lane change (0=left, 2=right) primesc bonus inițial
+        Q[:, :, :, :, :, :, 0] = 8.0  # LANE_LEFT - bonus mare inițial
+        Q[:, :, :, :, :, :, 2] = 8.0  # LANE_RIGHT - bonus mare inițial
 
     rewards = []
+    lane_changes_per_ep = []  # Track lane changes
     epsilon = eps_start
     print(f"Start Training... Q-Table size: {Q.size} elemente.")
+    print(f"[CONFIG] alpha={alpha}, gamma={gamma}, eps_decay={eps_decay}")
+    print(f"[CONFIG] Optimistic init: Q-values start at 5.0-8.0")
 
     try:
         for ep in range(episodes):
             obs, info = env.reset()
             state = discretize_state(env)
             total_reward = 0.0
+            lane_changes = 0  # Counter pentru acest episod
+            prev_lane = state[0]
 
             for t in range(max_steps):
                 action = epsilon_greedy(Q, state, epsilon)
                 obs, reward, terminated, truncated, info = env.step(action)
                 next_state = discretize_state(env)
+                
+                # Track lane changes
+                if next_state[0] != prev_lane:
+                    lane_changes += 1
+                    prev_lane = next_state[0]
 
                 l, s, d, rs, ls, rsf = state
                 nl, ns, nd, nrs, nls, nrsf = next_state
@@ -181,8 +203,9 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
                     break
 
             rewards.append(total_reward)
+            lane_changes_per_ep.append(lane_changes)
             epsilon = max(eps_end, epsilon * eps_decay)
-            print(f"Ep {ep + 1:04d} | eps={epsilon:.3f} | steps={t+1} | reward={total_reward:.2f}")
+            print(f"Ep {ep + 1:04d} | eps={epsilon:.3f} | steps={t+1} | LC={lane_changes:2d} | reward={total_reward:.2f}")
             if (ep + 1) % 10 == 0:
                 avg_last = np.mean(rewards[-10:])
                 print(f"   >>> Avg Reward (last 10): {avg_last:.2f}")

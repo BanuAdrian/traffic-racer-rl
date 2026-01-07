@@ -130,6 +130,9 @@ class TwoWay4LaneEnv(TwoWayEnv):
         self.last_step_overtaken = 0
         self.last_step_oncoming_passed = 0
         self._spawn_cooldown = 0
+        # Counter pentru cât timp stă pe aceeași bandă
+        self._same_lane_steps = 0
+        self._last_lane = None
         
     def _spawn_vehicle_safe(self, lane_id: tuple, x_pos: float, speed: float, 
                             vehicles_type, min_spacing: float = 25.0) -> bool:
@@ -334,11 +337,29 @@ class TwoWay4LaneEnv(TwoWayEnv):
         - Menține highest speed
         - Merge pe contrasens des
         - NU stă în spatele mașinilor lente
+        - NU stă pe aceeași bandă prea mult
         """
         
         current_lane_idx = 0
         try: current_lane_idx = self.vehicle.lane_index[2]
         except: pass
+        
+        # --- TRACK SAME LANE TIME ---
+        if self._last_lane is None:
+            self._last_lane = current_lane_idx
+        
+        if current_lane_idx == self._last_lane:
+            self._same_lane_steps += 1
+        else:
+            self._same_lane_steps = 0
+            self._last_lane = current_lane_idx
+        
+        # Penalizare crescătoare pentru a sta pe aceeași bandă prea mult
+        # După 50 steps (~10 secunde) începe penalizarea
+        same_lane_penalty = 0.0
+        if self._same_lane_steps > 50:
+            # Penalizare care crește liniar, ajungând la maxim în ~10 secunde (50 steps)
+            same_lane_penalty = min(1.0, (self._same_lane_steps - 50) / 50.0)
         
         # Ești pe contrasens dacă indexul e 2 sau 3
         is_oncoming_lane = 1.0 if current_lane_idx >= 2 else 0.0
@@ -430,6 +451,7 @@ class TwoWay4LaneEnv(TwoWayEnv):
             "finish_reward": finish_bonus,
             "stagnation_penalty": stagnation_penalty,
             "progress_reward": progress,
+            "same_lane_penalty": same_lane_penalty,  # NOU: penalizare pentru a sta pe aceeași bandă
         }
 
     def _reward(self, action: int) -> float:

@@ -55,6 +55,10 @@ ENV_CONFIG = {
     
     # g. TIMEOUT PENALTY - Penalizare când nu termini traseul!
     "timeout_penalty": -30.0,
+    
+    # h. SAME LANE PENALTY - Penalizare pentru a sta prea mult pe aceeași bandă
+    # Crește gradual după 50 steps pe aceeași bandă
+    "same_lane_penalty": -0.5,
 
     "offroad_terminal": True,
     "road_length": 1250,
