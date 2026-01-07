@@ -16,20 +16,103 @@ from env_config import ENV_CONFIG
 # --- CONSTANTE PENTRU DISCRETIZARE ---
 SPEED_BIN = 5.0
 MAX_SPEED_BINS = 3
-# Praguri pentru SENS NORMAL
-DIST_BINS_NORMAL = [15, 40]
-# Praguri pentru CONTRASENS (mult mai defensive, vitezele se cumulează)
-DIST_BINS_ONCOMING = [50, 100]
-REL_SPEED_APPROACHING = 0.1  # Prag redus pentru a fi mai sensibil
-# Zonă de pericol [-40m în spate, +20m în față] pentru schimb de bandă
-ADJACENT_DANGER_ZONE = [-40, 20]
-LANE_WIDTH = 4.0  # Lățimea standard a unei benzi
+
+# Situations
+SIT_SAFE = 0
+SIT_CAUTION = 1
+SIT_DANGER = 2
+NUM_SITUATIONS = 3
+
+# Distances for situations
+DIST_DANGER_SAME = 30.0
+DIST_CAUTION_SAME = 60.0
+DIST_DANGER_ONCOMING = 60.0
+DIST_CAUTION_ONCOMING = 100.0
+
+LANE_WIDTH = 4.0
+
+def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed: float, ego_lane: int) -> int:
+    """
+    Calculează situația (SAFE, CAUTION, DANGER) pentru o bandă specifică.
+    Ia în considerare distanța și viteza relativă față de cea mai apropiată mașină din față.
+    """
+    closest_dist = 200.0
+    closest_v = None
+    
+    # Identificăm sensul benzii verificate
+    # 0, 1 -> Sens A (același cu ego start)
+    # 2, 3 -> Sens B (contrasens)
+    is_oncoming_lane = (lane_idx_check >= 2)
+    
+    if hasattr(env, "road") and env.road:
+        for v in env.road.vehicles:
+            if v is env.vehicle:
+                continue
+                
+            # Verificăm dacă vehiculul e pe banda pe care o analizăm
+            # Structura lane_index: ("a", "b", 0) sau ("b", "a", 0)
+            # Trebuie să mapăm corect indexul 0-3 la structura internă
+            v_lane_idx = 0
+            try:
+                if v.lane_index[0] == "a":
+                    v_lane_idx = v.lane_index[2]
+                else:
+                    # Benzile 0,1 de pe "b"-> "a" corespund vizual cu 2,3
+                    v_lane_idx = v.lane_index[2] + 2
+            except:
+                continue
+                
+            if v_lane_idx != lane_idx_check:
+                continue
+
+            # Calculăm distanța pe axa X (longitudinală)
+            d_raw = v.position[0] - ego_pos[0]
+            
+            # Determinăm limita de căutare în spate
+            # Pentru banda curentă: ne interesează doar ce e în față (sau foarte puțin suprapus)
+            # Pentru alte benzi: ne interesează și ce e în "unghiul mort" sau lateral (-20m)
+            search_behind_dist = -10.0 if lane_idx_check != ego_lane else -2.0
+            
+            if d_raw > search_behind_dist and d_raw < closest_dist:
+                closest_dist = d_raw
+                closest_v = v
+
+    # Dacă nu e nimeni în față pe distanța relevantă -> SAFE
+    if closest_v is None:
+        return SIT_SAFE
+
+    # Calculăm situația bazat pe distanță și viteză relativă
+    if is_oncoming_lane:
+        # Pe contrasens, viteza relativă e suma vitezelor (aproximativ)
+        # E mult mai periculos
+        if closest_dist < DIST_DANGER_ONCOMING:
+            return SIT_DANGER
+        elif closest_dist < DIST_CAUTION_ONCOMING:
+            return SIT_CAUTION
+        else:
+            return SIT_SAFE
+    else:
+        # Sens normal
+        rel_speed = ego_speed - closest_v.speed # Pozitiv = ne apropiem
+        
+        if closest_dist < DIST_DANGER_SAME:
+            return SIT_DANGER
+        elif closest_dist < DIST_CAUTION_SAME:
+            # Dacă ne apropiem repede, e Danger chiar dacă distanța e medie
+            if rel_speed > 5.0: # Ne apropiem cu > 18 km/h diferență
+                return SIT_DANGER
+            return SIT_CAUTION
+        else:
+            # Distanță mare, dar verificăm viteza relativă extremă
+            if rel_speed > 10.0 and closest_dist < 80.0:
+                return SIT_CAUTION
+            return SIT_SAFE
 
 
-def discretize_state(env) -> Tuple[int, int, int, int, int]:
+def discretize_state(env) -> Tuple[int, int, int, int, int, int]:
     """
     Mapează starea la o tuplă discretă:
-    (lane_idx, speed_bin, situation, left_safe, right_safe)
+    (lane_idx, speed_bin, sit_l0, sit_l1, sit_l2, sit_l3)
     """
     # 1. Lane index (0-3)
     lane_idx = 0
@@ -45,86 +128,28 @@ def discretize_state(env) -> Tuple[int, int, int, int, int]:
     speed_bin = int(math.floor((speed - 0.01) / SPEED_BIN))
     speed_bin = max(0, min(MAX_SPEED_BINS - 1, speed_bin))
 
-    # --- Analiză Frontală & Laterală ---
-    front_dist = 200.0
-    rel_speed = 0.0
-    
-    # Boundary checks
-    left_safe = 0 if lane_idx == 0 else 1
-    right_safe = 0 if lane_idx == 3 else 1
-
+    # 3. Situations per lane
     ego_pos = env.vehicle.position
+    
+    sit_l0 = get_lane_situation(env, 0, ego_pos, speed, lane_idx)
+    sit_l1 = get_lane_situation(env, 1, ego_pos, speed, lane_idx)
+    sit_l2 = get_lane_situation(env, 2, ego_pos, speed, lane_idx)
+    sit_l3 = get_lane_situation(env, 3, ego_pos, speed, lane_idx)
 
-    if hasattr(env, "road") and env.road:
-        for v in env.road.vehicles:
-            if v is env.vehicle:
-                continue
-            d_raw = v.position[0] - ego_pos[0]
-            y_dist = v.position[1] - ego_pos[1]
-            abs_y_dist = abs(y_dist)
-            # LEFT SAFE: caut mașini pe stânga (y > ego), la distanță laterală de o bandă
-            if lane_idx < 3 and y_dist > 0.5 * LANE_WIDTH:
-                if abs_y_dist < LANE_WIDTH * 1.8 and ADJACENT_DANGER_ZONE[0] < d_raw < ADJACENT_DANGER_ZONE[1]:
-                    left_safe = 0
-            # RIGHT SAFE: caut mașini pe dreapta (y < ego), la distanță laterală de o bandă
-            if lane_idx > 0 and y_dist < -0.5 * LANE_WIDTH:
-                if abs_y_dist < LANE_WIDTH * 1.8 and ADJACENT_DANGER_ZONE[0] < d_raw < ADJACENT_DANGER_ZONE[1]:
-                    right_safe = 0
-            
-            # B. Verificare frontală (mașina din față)
-            is_on_same_lane = False
-            if v.lane_index[0] == "a" and v.lane_index[2] == lane_idx:
-                is_on_same_lane = True
-            elif v.lane_index[0] == "b" and lane_idx >= 2:
-                mapped_oncoming_idx = lane_idx - 2
-                if v.lane_index[2] == mapped_oncoming_idx:
-                    is_on_same_lane = True
-
-            if is_on_same_lane and d_raw > 0:
-                if d_raw < front_dist:
-                    front_dist = d_raw
-                    if v.lane_index[0] == "a":
-                        rel_speed = env.vehicle.speed - v.speed
-                    else:
-                        rel_speed = env.vehicle.speed + v.speed
-
-    # 3. Situation Binning (combină distanța și viteza relativă) - CORECTAT
-    dist_bins = DIST_BINS_ONCOMING if lane_idx >= 2 else DIST_BINS_NORMAL
-    situation = 0  # Default: FREE
-    if front_dist < dist_bins[0]:
-        situation = 3  # DANGER
-    elif front_dist < dist_bins[1]:
-        # Pe contrasens, nu există "following", e mereu "approaching"
-        if lane_idx >= 2:
-            situation = 1
-        else:
-            if rel_speed > REL_SPEED_APPROACHING:
-                situation = 1  # APPROACHING
-            else:
-                situation = 2  # FOLLOWING
-
-    return (lane_idx, speed_bin, situation, left_safe, right_safe)
+    return (lane_idx, speed_bin, sit_l0, sit_l1, sit_l2, sit_l3)
 
 
-
-def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int], epsilon: float) -> int:
+def epsilon_greedy(Q: np.ndarray, state: Tuple[int, int, int, int, int, int], epsilon: float) -> int:
     if random.random() < epsilon:
         return random.randrange(Q.shape[-1])
-    lane, spd, sit, lsafe, rsafe = state
-    return int(np.argmax(Q[lane, spd, sit, lsafe, rsafe]))
+    lane, spd, s0, s1, s2, s3 = state
+    return int(np.argmax(Q[lane, spd, s0, s1, s2, s3]))
 
 
 def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 0.2, gamma: float = 0.99,
                      eps_start: float = 1.0, eps_end: float = 0.05, eps_decay: float = 0.997,
                      Q_init: np.ndarray = None):
-    """Antrenare Q-learning îmbunătățit.
-    
-    Îmbunătățiri față de versiunea de bază:
-    - alpha=0.2: Learning rate mai mare pentru convergență rapidă
-    - gamma=0.99: Discount mai mare pentru a considera recompensele viitoare
-    - eps_decay=0.997: Explorare mai lungă (ajunge la 0.05 după ~1000 ep)
-    - Optimistic initialization: Q-values pornesc de la +5 pentru a încuraja explorarea
-    """
+    """Antrenare Q-learning îmbunătățit."""
     env = make_env(render_mode=None)
     n_actions = env.action_space.n
     lanes = int(ENV_CONFIG.get("lanes_count", 4))
@@ -134,13 +159,13 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
         Q = Q_init
         print(f"[INFO] Q-Table încărcat: {Q.shape}")
     else:
-        # OPTIMISTIC INITIALIZATION - pornește cu valori pozitive!
-        # Asta forțează agentul să exploreze toate acțiunile cel puțin o dată
-        # pentru că crede că fiecare acțiune e bună până învață contrariul
-        Q = np.ones((lanes, MAX_SPEED_BINS, 4, 2, 2, n_actions), dtype=np.float32) * 5.0
-        # Acțiunile de lane change (0=left, 2=right) primesc bonus inițial
-        Q[:, :, :, :, :, 0] = 8.0  # LANE_LEFT - bonus mare inițial
-        Q[:, :, :, :, :, 2] = 8.0  # LANE_RIGHT - bonus mare inițial
+        # OPTIMISTIC INITIALIZATION
+        # Shape: (4, 3, 3, 3, 3, 3, 5)
+        # (lane, speed, sit0, sit1, sit2, sit3, action)
+        Q = np.ones((lanes, MAX_SPEED_BINS, NUM_SITUATIONS, NUM_SITUATIONS, NUM_SITUATIONS, NUM_SITUATIONS, n_actions), dtype=np.float32) * 5.0
+        # Acțiunile de lane change primesc bonus inițial
+        Q[:, :, :, :, :, :, 0] = 8.0  # LANE_LEFT
+        Q[:, :, :, :, :, :, 2] = 8.0  # LANE_RIGHT
 
     rewards = []
     lane_changes_per_ep = []  # Track lane changes
@@ -167,13 +192,13 @@ def train_q_learning(episodes: int = 200, max_steps: int = 2000, alpha: float = 
                     lane_changes += 1
                     prev_lane = next_state[0]
 
-                l, s, sit, ls, rsf = state
-                nl, ns, nsit, nls, nrsf = next_state
+                l, s, s0, s1, s2, s3 = state
+                nl, ns, ns0, ns1, ns2, ns3 = next_state
                 
-                best_next = np.max(Q[nl, ns, nsit, nls, nrsf])
+                best_next = np.max(Q[nl, ns, ns0, ns1, ns2, ns3])
                 td_target = reward + gamma * best_next * (0 if terminated or truncated else 1)
-                td_error = td_target - Q[l, s, sit, ls, rsf, action]
-                Q[l, s, sit, ls, rsf, action] += alpha * td_error
+                td_error = td_target - Q[l, s, s0, s1, s2, s3, action]
+                Q[l, s, s0, s1, s2, s3, action] += alpha * td_error
 
                 total_reward += reward
                 state = next_state
@@ -237,7 +262,7 @@ def load_model(path: str) -> np.ndarray:
 def main():
     parser = argparse.ArgumentParser(description="Tabular Q-learning")
     parser.add_argument("--episodes", type=int, default=500, help="Număr episoade")
-    parser.add_argument("--max-steps", type=int, default=2000, help="Pași pe episod (mărit pentru a ajunge la final)")
+    parser.add_argument("--max-steps", type=int, default=2000, help="Pași pe episod")
     parser.add_argument("--alpha", type=float, default=0.1, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.97, help="Discount factor")
     parser.add_argument("--eps-start", type=float, default=1.0, help="Epsilon inițial")
@@ -246,7 +271,7 @@ def main():
     parser.add_argument("--eval-episodes", type=int, default=5, help="Episoade de evaluare")
     parser.add_argument("--eval-render", action="store_true", help="Randează în evaluare")
     parser.add_argument("--model-path", type=str, default="q_table.npy", help="Path model salvat")
-    parser.add_argument("--load-model", type=str, default=None, help="Path model de încărcat pentru a continua antrenamentul")
+    parser.add_argument("--load-model", type=str, default=None, help="Path model de încărcat")
     parser.add_argument("--eval-only", action="store_true", help="Doar evaluare")
     args = parser.parse_args()
 
@@ -254,7 +279,6 @@ def main():
         try: Q = load_model(args.model_path)
         except FileNotFoundError: return
     else:
-        # Încarcă model existent dacă e specificat
         Q_init = None
         if args.load_model:
             try:
