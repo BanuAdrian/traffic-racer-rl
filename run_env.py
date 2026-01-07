@@ -2,8 +2,13 @@
 
 import argparse
 import time
+from collections import deque
 
 from traffic_racer_env import make_env
+
+# Buffer pentru smoothing distanță (medie mobilă pe ultimele N valori)
+DIST_BUFFER_SIZE = 10
+dist_buffer = deque(maxlen=DIST_BUFFER_SIZE)
 
 
 def rollout(env, steps: int = 800) -> None:
@@ -38,18 +43,20 @@ def main():
         
         total_reward = 0.0
         done = False
+        step_count = 0  # Counter pentru step-uri
         
-        # Luăm config-ul ca să știm cât valorează fiecare acțiune
+        # Luăm config-ul ca să știm cât valoreaază fiecare acțiune
         config = env.unwrapped.config
 
         while not done:
             obs, reward, terminated, truncated, info = env.step(env.action_space.sample()) 
             total_reward += reward
+            step_count += 1
             
             if hasattr(env.unwrapped, "vehicle") and env.unwrapped.vehicle:
                 ego = env.unwrapped.vehicle
                 
-                # --- 1. Distanță ---
+                # --- 1. Distanță cu SMOOTHING ---
                 min_dist = float("inf")
                 if hasattr(env.unwrapped, "road") and env.unwrapped.road:
                     for v in env.unwrapped.road.vehicles:
@@ -60,19 +67,30 @@ def main():
                                 if 0 < d_long < min_dist:
                                     min_dist = d_long
                         except: pass
-                dist_str = f"{min_dist:.1f}m" if min_dist != float("inf") else "Free"
+                
+                # Adaugă în buffer și calculează media
+                if min_dist != float("inf"):
+                    dist_buffer.append(min_dist)
+                    avg_dist = sum(dist_buffer) / len(dist_buffer)
+                    dist_str = f"{avg_dist:.0f}m"  # Afișăm fără zecimale pentru stabilitate
+                else:
+                    dist_buffer.clear()  # Reset buffer când e liber
+                    dist_str = "Free"
 
                 # --- 2. Reward-uri Reale (Cantitate * Preț) ---
                 r_dict = env.unwrapped._rewards(1) 
                 
-                # Aici facem conversia: Cantitate (din dict) * Preț (din config)
+                # Calculăm toate rewardurile din step-ul curent
                 hero_pts = r_dict.get('oncoming_overtake_reward', 0.0) * config.get("oncoming_overtake_reward", 0.0)
                 near_pts = r_dict.get('near_miss_reward', 0.0) * config.get("near_miss_reward", 0.0)
                 ovr_pts  = r_dict.get('overtaking_reward', 0.0) * config.get("overtaking_reward", 0.0)
                 path_pts = r_dict.get('clear_path_reward', 0.0) * config.get("clear_path_reward", 0.0)
-                
-                # La viteză calculul e mai complex, afișăm doar procentul (0.0 la 1.0)
-                spd_val  = r_dict.get('high_speed_reward', 0.0)
+                spd_pts  = r_dict.get('high_speed_reward', 0.0) * config.get("high_speed_reward", 0.0)
+                onc_pts  = r_dict.get('oncoming_lane_reward', 0.0) * config.get("oncoming_lane_reward", 0.0)
+                stag_pts = r_dict.get('stagnation_penalty', 0.0) * config.get("stagnation_penalty", 0.0)
+                prog_pts = r_dict.get('progress_reward', 0.0) * config.get("progress_reward", 0.0)
+                fin_pts  = r_dict.get('finish_reward', 0.0) * config.get("finish_reward", 0.0)
+                lane_pts = r_dict.get('lane_change_reward', 0.0) * config.get("lane_change_reward", 0.0)
 
                 # Info bandă
                 try:
@@ -80,24 +98,48 @@ def main():
                     lane_type = "ONC" if lane_idx >= 2 else "OK "
                 except:
                     lane_idx = -1; lane_type = "???"
+                
+                # Progres pe drum
+                road_len = config.get("road_length", 1250)
+                progress_pct = (ego.position[0] / road_len) * 100
 
-                debug_str = (
-                    f"Score:{total_reward:.2f}|"
-                    f"HERO:{hero_pts:.0f}|"    # Ar trebui să afișeze 4 sau 0
-                    f"Near:{near_pts:.1f}|"    # Ar trebui să afișeze 0.5, 1.0 etc
-                    f"Ovr:{ovr_pts:.0f}|"      # 1 sau 0
-                    f"Path:{path_pts:.1f}|"
-                    f"Spd:{spd_val:.2f}|"
-                    f"L:{lane_idx}({lane_type})|"
-                    f"Dist:{dist_str:<5}"
+                # Linia 1: Info generală
+                line1 = (
+                    f"Step:{step_count:4d} | "
+                    f"Score:{total_reward:7.1f} | "
+                    f"Spd:{ego.speed:4.1f} | "
+                    f"L:{lane_idx}({lane_type}) | "
+                    f"Dist:{dist_str:<5} | "
+                    f"Prog:{progress_pct:5.1f}%"
                 )
-                print(debug_str + " " * 5, end="\r")
+                
+                # Linia 2: Rewarduri din step-ul curent (doar cele nenule)
+                rewards_parts = []
+                if hero_pts != 0: rewards_parts.append(f"HERO:{hero_pts:+.1f}")
+                if near_pts != 0: rewards_parts.append(f"Near:{near_pts:+.1f}")
+                if ovr_pts != 0: rewards_parts.append(f"Ovr:{ovr_pts:+.1f}")
+                if path_pts != 0: rewards_parts.append(f"Path:{path_pts:+.2f}")
+                if spd_pts != 0: rewards_parts.append(f"Spd:{spd_pts:+.2f}")
+                if onc_pts != 0: rewards_parts.append(f"Onc:{onc_pts:+.2f}")
+                if stag_pts != 0: rewards_parts.append(f"STAG:{stag_pts:+.1f}")
+                if prog_pts != 0: rewards_parts.append(f"Prog:{prog_pts:+.2f}")
+                if lane_pts != 0: rewards_parts.append(f"Lane:{lane_pts:+.2f}")
+                if fin_pts != 0: rewards_parts.append(f"FIN:{fin_pts:+.1f}")
+                
+                line2 = "Rewards: " + " | ".join(rewards_parts) if rewards_parts else "Rewards: (none)"
+                
+                # Afișăm pe două linii
+                print(f"\r{line1}" + " " * 20)
+                print(f"\r{line2}" + " " * 40, end="")
+                print("\033[F", end="")  # Mută cursorul însus cu o linie
 
             env.render()
             if terminated or truncated:
-                print(f"\n[Terminated] Final Score: {total_reward:.2f}. Resetare...")
+                print(f"\n\n[Terminated] Step: {step_count} | Final Score: {total_reward:.2f}. Resetare...")
                 env.reset()
                 total_reward = 0.0
+                step_count = 0
+                dist_buffer.clear()
     else:
         print(f"Env config manual_control: {env.unwrapped.config.get('manual_control')}")
         env.metadata["render_fps"] = 30

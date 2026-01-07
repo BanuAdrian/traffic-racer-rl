@@ -328,22 +328,14 @@ class TwoWay4LaneEnv(TwoWayEnv):
 
     def _rewards(self, action: int) -> dict:
         """
-        Mixul Final:
-        1. Viteză Pătratică (dependență de viteză maximă)
-        2. Depășire Heroică (Bonus masiv pe contrasens)
-        3. Clear Path (Anticipare trafic)
+        Sistem de rewarduri pentru Traffic Racer:
+        - Ajunge la final
+        - Face multe depășiri  
+        - Menține highest speed
+        - Merge pe contrasens des
+        - NU stă în spatele mașinilor lente
         """
         
-        # --- 1. VITEZA PĂTRATICĂ ---
-        # 25 m/s = 1.0 puncte
-        # 20 m/s = 0.64 puncte
-        # 10 m/s = 0.16 puncte
-        # Asta elimină nevoia de "low_speed_penalty".
-        max_speed = 25.0
-        current_speed = self.vehicle.speed
-        speed_reward = (current_speed / max_speed) ** 2
-        
-        # 1. Detectare dacă suntem pe contrasens
         current_lane_idx = 0
         try: current_lane_idx = self.vehicle.lane_index[2]
         except: pass
@@ -351,32 +343,18 @@ class TwoWay4LaneEnv(TwoWayEnv):
         # Ești pe contrasens dacă indexul e 2 sau 3
         is_oncoming_lane = 1.0 if current_lane_idx >= 2 else 0.0
 
-        # --- LOGICA DE REWARD PENTRU INTERACȚIUNI ---
+        # --- 1. VITEZA ---
+        # Folosim viteza maximă din config pentru normalizare
+        target_speeds = self.config.get("action", {}).get("target_speeds", [5, 10, 15])
+        max_speed = max(target_speeds) if target_speeds else 15.0
+        current_speed = self.vehicle.speed
         
-        # 1. Depășire Normală (Sensul meu)
-        overtaken_count = float(self.last_step_overtaken)
-        normal_overtake = 0.0
-        hero_overtake = 0.0
+        # Reward pătratic pentru viteză (încurajează viteza maximă)
+        speed_reward = (current_speed / max_speed) ** 2
         
-        if overtaken_count > 0:
-            if is_oncoming_lane:
-                hero_overtake = overtaken_count # Depășesc stând pe contrasens (Foarte periculos!)
-            else:
-                normal_overtake = overtaken_count # Depășesc normal
-        
-        # --- MODIFICAREA AICI ---
-        # 2. Near Miss (Trecere pe lângă trafic din față)
-        raw_near_miss_count = float(self.last_step_oncoming_passed)
-        final_near_miss_reward = 0.0
-        
-        # Condiția: Primești puncte DOAR dacă ești tu pe contrasens
-        # în momentul în care treci pe lângă ei.
-        if is_oncoming_lane > 0:
-            final_near_miss_reward = raw_near_miss_count
-
-        # --- 3. CLEAR PATH (Ochii din față) ---
-        # Verificăm dacă avem drum liber pe 60m în față pe banda curentă
-        clear_path = 0.0
+        # --- 2. PENALIZARE STAGNARE ---
+        # Dacă ai mașină în față aproape și mergi încet = BAD
+        stagnation_penalty = 0.0
         min_front_dist = 200.0
         
         if self.road:
@@ -385,52 +363,73 @@ class TwoWay4LaneEnv(TwoWayEnv):
                 try: v_lane = v.lane_index[2]
                 except: continue
                 
-                # Dacă e pe banda mea și în față
                 if v_lane == current_lane_idx:
                     d = v.position[0] - self.vehicle.position[0]
                     if 0 < d < min_front_dist:
                         min_front_dist = d
         
-        # Dacă am > 60m liberi, primesc un mic bonus constant
-        if min_front_dist > 60.0:
-            clear_path = 1.0
-
-        # --- 4. LANE CHANGE ---
-        lane_change = 1.0 if action in [0, 2] else 0.0
-
-        # --- LOGICA DE FINALIZARE ---
-        finish_bonus = 0.0
+        # Penalizare STAGNARE - mai agresivă!
+        # Se aplică dacă: mașină aproape (<30m) ȘI nu mergi la viteză maximă
+        # Penalizare graduală: cu cât ești mai aproape și mai încet, cu atât e mai mare
+        if min_front_dist < 30.0 and current_speed < max_speed * 0.9:
+            # Factori: cât de aproape (1.0 la 5m, 0.0 la 30m) și cât de încet
+            dist_factor = max(0.0, 1.0 - min_front_dist / 30.0)
+            speed_factor = max(0.0, 1.0 - current_speed / max_speed)
+            stagnation_penalty = dist_factor * (0.5 + speed_factor)  # 0.5 - 1.5
         
+        # --- 3. CLEAR PATH ---
+        # Bonus dacă ai drum liber (>40m) - încurajează să găsești spațiu
+        clear_path = 1.0 if min_front_dist > 40.0 else 0.0
+
+        # --- 4. DEPĂȘIRI ---
+        overtaken_count = float(self.last_step_overtaken)
+        normal_overtake = 0.0
+        hero_overtake = 0.0
+        
+        if overtaken_count > 0:
+            if is_oncoming_lane:
+                hero_overtake = overtaken_count  # Depășire pe contrasens = JACKPOT
+            else:
+                normal_overtake = overtaken_count  # Depășire normală
+
+        # --- 5. NEAR MISS (trecere pe lângă contrasens) ---
+        raw_near_miss_count = float(self.last_step_oncoming_passed)
+        final_near_miss_reward = 0.0
+        if is_oncoming_lane > 0:
+            final_near_miss_reward = raw_near_miss_count
+
+        # --- 6. LANE CHANGE ---
+        lane_change = 1.0 if action in [0, 2] else 0.0
+        
+        # --- 7. PROGRES PE DRUM ---
+        # Bonus mic pentru progresul făcut (încurajează să meargă înainte)
         road_len = self.config.get("road_length", 1000)
+        progress = self.vehicle.position[0] / road_len  # 0.0 -> 1.0
+        progress_reward = progress  # Crește pe măsură ce avansezi
+
+        # --- 8. FINALIZARE ---
+        finish_bonus = 0.0
         duration = self.config.get("duration", 40)
         
-        # 1. Verificăm ROAD END (Victorie Totală)
-        # Am parcurs tot drumul -> Viteza a fost bună -> BONUS MARE
         if self.vehicle.position[0] >= road_len - 10:
-            finish_bonus = 50.0  
-            
-        # 2. Verificăm TIME OUT (Supraviețuire)
-        # Nu am ajuns la capăt, dar timpul e pe sfârșite -> BONUS MEDIU
-        # self.time crește cu 1/FPS la fiecare pas.
-        # Verificăm dacă suntem în ultima secundă
+            # VICTORIE - bonus mare!
+            finish_bonus = 50.0
         elif self.time >= duration - (1.0 / self.config["simulation_frequency"]):
-            # Îi dăm puncte că a supraviețuit, dar mai puține decât dacă ajungea la capăt.
-            # Astfel, nu e tentat să meargă încet doar ca să treacă timpul.
-            finish_bonus = 20.0
+            # TIMEOUT - PENALIZARE! Nu e ok să stai pe loc
+            finish_bonus = self.config.get("timeout_penalty", -30.0)
             
         return {
             "collision_reward": float(self.vehicle.crashed),
-            "high_speed_reward": (self.vehicle.speed / 25.0) ** 2,
+            "high_speed_reward": speed_reward,
             "oncoming_lane_reward": is_oncoming_lane,
             "lane_change_reward": lane_change,
             "clear_path_reward": clear_path,
-            
             "overtaking_reward": normal_overtake,
             "oncoming_overtake_reward": hero_overtake,
-            
-            # Folosim variabila filtrată
             "near_miss_reward": final_near_miss_reward, 
-            "finish_reward": finish_bonus
+            "finish_reward": finish_bonus,
+            "stagnation_penalty": stagnation_penalty,
+            "progress_reward": progress,
         }
 
     def _reward(self, action: int) -> float:

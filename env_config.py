@@ -8,58 +8,53 @@ ENV_CONFIG = {
     "min_initial_vehicles": 75,   # Minim mașini la start
     "max_initial_vehicles": 75,   # Maxim mașini la start  
     "traffic_density": 100,        # Țintă: câte mașini în zona vizibilă (~150m)
-    "duration": 120,
+    "duration": 150,               # 150 secunde - suficient pentru 1250m la ~10m/s
     "controlled_vehicles": 1,
     "ego_spacing": 2,
     
-    # --- REWARD TUNING ---
+    # --- REWARD TUNING pentru Q-Learning ---
     
-    # 1. SUPRAVIEȚUIRE (Costul Morții)
-    # Mărim la -100. De ce?
-    # Dacă un episod bun are 200 de puncte, -50 e acceptabil ca sacrificiu.
-    # -100 înseamnă "Game Over" psihologic pentru agent.
-    "collision_reward": -100.0,
+    # 1. COLIZIUNE (Moartea)
+    # Trebuie să fie destul de mare să descurajeze riscuri, dar nu să domine total
+    "collision_reward": -50.0,
 
-    # 2. FLUXUL PASIV (Salariul de bază)
-    # Îl ținem mic. Agentul nu trebuie să se îmbogățească doar stând degeaba.
-    # Maxim 0.5 puncte/pas la viteză maximă.
-    "high_speed_reward": 0.5,
+    # 2. VITEZĂ (per step) - MĂRIT pentru a încuraja viteza mare
+    # La 750 steps cu viteză maximă: 0.2 × 750 = 150 puncte
+    "high_speed_reward": 0.2,
     
-    # 3. BONUSURI ACTIVE (Evenimente - Aici sunt banii!)
+    # 3. BONUSURI ACTIVE (Evenimente unice - PRINCIPALE!)
     
-    # a. Depășire Normală
-    # Trebuie să acopere costul schimbării de bandă și să dea profit.
-    # Dacă schimbarea e -0.3, depășirea trebuie să fie semnificativă.
-    "overtaking_reward": 2.0, 
+    # a. Depășire Normală - Recompensa principală!
+    "overtaking_reward": 3.0, 
     
-    # b. Depășire Heroică (Pe Contrasens)
-    # JACKPOT-ul. Vrem ca agentul să vadă contrasensul ca pe o mină de aur.
-    # Valoarea 10.0 este imensă. Îl va face să ignore frica.
-    "oncoming_overtake_reward": 10.0,
+    # b. Depășire pe Contrasens - Risc mare = Reward mare, dar nu nebunesc
+    "oncoming_overtake_reward": 5.0,
     
-    # c. Near Miss (Trecere razantă pe lângă trafic din față)
-    # Flux constant de dopamină când ești pe contrasens.
-    # 1.5 puncte per mașină. Dacă trec 3 mașini într-o secundă = 4.5 puncte.
-    "near_miss_reward": 1.5,
+    # c. Near Miss (Trecere pe lângă mașini din contrasens)
+    "near_miss_reward": 1.0,
 
-    # 4. GHIDAJ & CORECTURI (Busola)
+    # 4. GHIDAJ (per step - MICI!)
     
-    # a. Clear Path (Viziune)
-    # Mic, doar cât să diferențieze o bandă liberă de una blocată.
-    "clear_path_reward": 0.1, 
+    # a. Clear Path - Foarte mic, doar ghidaj
+    "clear_path_reward": 0.05, 
 
-    # b. Stat pe Contrasens (Pasiv)
-    # REDUCEM la 0.2. 
-    # De ce? Nu vrem să stea pe contrasens când e gol (campare).
-    # Vrem să stea pe contrasens DOAR ca să facă "Near Miss" sau "Hero Overtake".
-    "oncoming_lane_reward": 0.2,
+    # b. Pe Contrasens (pasiv) - Mic, doar să încurajeze explorarea
+    "oncoming_lane_reward": 0.1,
 
-    # c. Schimbare Bandă (Costul de tranzacție)
-    # Mărim puțin penalizarea la -0.3.
-    # Elimină "tremuratul" inutil. Schimbi doar dacă ai un motiv (depășire).
-    "lane_change_reward": -0.3,
+    # c. Schimbare Bandă - Cost mic de tranzacție
+    "lane_change_reward": -0.1,
     
-    "finish_reward": 1.0, # Multiplicator (Logica de 20 vs 50 e în env)
+    # d. STAGNATION - Penalizare când stai blocat (MĂRIT!)
+    "stagnation_penalty": -1.5,
+    
+    # e. PROGRESS - Încurajează să avanseze pe drum
+    "progress_reward": 0.3,
+    
+    # f. FINISH - Bonus mare pentru victorie, PENALIZARE pentru timeout!
+    "finish_reward": 1.0, # Multiplicator: 50 puncte victorie
+    
+    # g. TIMEOUT PENALTY - Penalizare când nu termini traseul!
+    "timeout_penalty": -30.0,
 
     "offroad_terminal": True,
     "road_length": 1250,
