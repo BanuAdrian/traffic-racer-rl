@@ -19,6 +19,18 @@ MAX_SPEED_BINS = 3
 
 # Situations
 SIT_SAFE = 0
+MIN_EPSILON = 0.01
+
+def save_rewards_to_csv(rewards: list, filename: str):
+    """Saves the list of rewards to a CSV file."""
+    try:
+        with open(filename, 'w') as f:
+            f.write("episode,reward\n")
+            for i, r in enumerate(rewards):
+                f.write(f"{i+1},{r}\n")
+        print(f"Rewards saved to: {filename}")
+    except Exception as e:
+        print(f"Error saving rewards: {e}")
 SIT_CAUTION = 1
 SIT_DANGER = 2
 SIT_WALL = 3
@@ -267,10 +279,10 @@ def main():
     parser.add_argument("--episodes", type=int, default=500, help="Număr episoade")
     parser.add_argument("--max-steps", type=int, default=2000, help="Pași pe episod")
     parser.add_argument("--alpha", type=float, default=0.1, help="Learning rate")
-    parser.add_argument("--gamma", type=float, default=0.97, help="Discount factor")
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--eps-start", type=float, default=1.0, help="Epsilon inițial")
     parser.add_argument("--eps-end", type=float, default=0.05, help="Epsilon minim")
-    parser.add_argument("--eps-decay", type=float, default=0.992, help="Factor de decay")
+    parser.add_argument("--eps-decay", type=float, default=0.995, help="Factor de decay")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Episoade de evaluare")
     parser.add_argument("--eval-render", action="store_true", help="Randează în evaluare")
     parser.add_argument("--model-path", type=str, default="q_table.npy", help="Path model salvat")
@@ -301,6 +313,10 @@ def main():
             Q_init=Q_init,
         )
         save_model(Q, args.model_path)
+
+        # Save rewards to CSV
+        log_file = f"{args.model_path}_rewards.csv"
+        save_rewards_to_csv(rewards, log_file)
 
     if args.eval_episodes > 0:
         evaluate_q(Q, episodes=args.eval_episodes, max_steps=args.max_steps, render=args.eval_render)

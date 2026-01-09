@@ -16,11 +16,11 @@ ENV_CONFIG = {
     
     # 1. COLIZIUNE (Moartea)
     # Trebuie să fie destul de mare să descurajeze riscuri, dar nu să domine total
-    "collision_reward": -50.0,
+    "collision_reward": -40.0,
 
     # 2. VITEZĂ (per step) - MĂRIT pentru a încuraja viteza mare
-    # La 750 steps cu viteză maximă: 0.2 × 750 = 150 puncte
-    "high_speed_reward": 0.2,
+    # La 750 steps cu viteză maximă: 0.5 × 750 = 375 puncte
+    "high_speed_reward": 0.5,
     
     # 3. BONUSURI ACTIVE (Evenimente unice - PRINCIPALE!)
     
@@ -38,17 +38,17 @@ ENV_CONFIG = {
     # a. Clear Path - Foarte mic, doar ghidaj
     "clear_path_reward": 0.05, 
 
-    # b. Pe Contrasens (pasiv) - Mic, doar să încurajeze explorarea
-    "oncoming_lane_reward": 0.1,
+    # b. Pe Contrasens (pasiv) - PENALIZARE dacă nu depășești!
+    "oncoming_lane_reward": -0.1,
 
-    # c. Schimbare Bandă - Cost mic de tranzacție
-    "lane_change_reward": -0.1,
+    # c. Schimbare Bandă - Cost mai mare pentru a evita zig-zag inutil
+    "lane_change_reward": -0.3,
     
     # d. STAGNATION - Penalizare când stai blocat (MĂRIT!)
     "stagnation_penalty": -1.5,
     
     # e. PROGRESS - Încurajează să avanseze pe drum
-    "progress_reward": 0.3,
+    "progress_reward": 0.5,
     
     # f. FINISH - Bonus mare pentru victorie, PENALIZARE pentru timeout!
     "finish_reward": 1.0, # Multiplicator: 50 puncte victorie
