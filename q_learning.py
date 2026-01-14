@@ -20,17 +20,6 @@ MAX_SPEED_BINS = 3
 # Situations
 SIT_SAFE = 0
 MIN_EPSILON = 0.01
-
-def save_rewards_to_csv(rewards: list, filename: str):
-    """Saves the list of rewards to a CSV file."""
-    try:
-        with open(filename, 'w') as f:
-            f.write("episode,reward\n")
-            for i, r in enumerate(rewards):
-                f.write(f"{i+1},{r}\n")
-        print(f"Rewards saved to: {filename}")
-    except Exception as e:
-        print(f"Error saving rewards: {e}")
 SIT_CAUTION = 1
 SIT_DANGER = 2
 SIT_WALL = 3
@@ -43,6 +32,17 @@ DIST_DANGER_ONCOMING = 60.0
 DIST_CAUTION_ONCOMING = 100.0
 
 LANE_WIDTH = 4.0
+
+def save_rewards_to_csv(rewards: list, filename: str):
+    """Saves the list of rewards to a CSV file."""
+    try:
+        with open(filename, 'w') as f:
+            f.write("episode,reward\n")
+            for i, r in enumerate(rewards):
+                f.write(f"{i+1},{r}\n")
+        print(f"Rewards saved to: {filename}")
+    except Exception as e:
+        print(f"Error saving rewards: {e}")
 
 def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed: float, ego_lane: int) -> int:
     """
@@ -60,9 +60,10 @@ def get_lane_situation(env, lane_idx_check: int, ego_pos: np.ndarray, ego_speed:
     # 2, 3 -> Sens B (contrasens)
     is_oncoming_lane = (lane_idx_check >= 2)
     
-    if hasattr(env, "road") and env.road:
-        for v in env.road.vehicles:
-            if v is env.vehicle:
+    unwrapped_env = env.unwrapped
+    if hasattr(unwrapped_env, "road") and unwrapped_env.road:
+        for v in unwrapped_env.road.vehicles:
+            if v is unwrapped_env.vehicle:
                 continue
                 
             # Verificăm dacă vehiculul e pe banda pe care o analizăm
@@ -131,21 +132,25 @@ def discretize_state(env) -> Tuple[int, int, int, int, int]:
     (lane_idx, speed_bin, sit_left, sit_center, sit_right)
     """
     # 1. Lane index (0-3)
+    # 1. Lane index (0-3)
     lane_idx = 0
-    if hasattr(env, "vehicle") and getattr(env.vehicle, "lane_index", None):
+    vehicle = env.unwrapped.vehicle
+    if hasattr(vehicle, "lane_index"):
         try:
-            lane_idx = int(env.vehicle.lane_index[2])
+            lane_idx = int(vehicle.lane_index[2])
         except Exception:
             lane_idx = 0
     lane_idx = max(0, min(int(ENV_CONFIG.get("lanes_count", 4)) - 1, lane_idx))
 
     # 2. Speed bin (0-2)
-    speed = float(getattr(env.vehicle, "speed", 0.0))
+    # Accesăm vehiculul prin .unwrapped pentru a trece de wrapper-ele Gym
+    vehicle = env.unwrapped.vehicle
+    speed = float(getattr(vehicle, "speed", 0.0))
     speed_bin = int(math.floor((speed - 0.01) / SPEED_BIN))
     speed_bin = max(0, min(MAX_SPEED_BINS - 1, speed_bin))
 
     # 3. Relative Situations
-    ego_pos = env.vehicle.position
+    ego_pos = vehicle.position
     
     sit_left = get_lane_situation(env, lane_idx - 1, ego_pos, speed, lane_idx)
     sit_center = get_lane_situation(env, lane_idx, ego_pos, speed, lane_idx)
@@ -246,12 +251,23 @@ def evaluate_q(Q: np.ndarray, episodes: int = 5, max_steps: int = 500, render: b
         total_reward = 0.0
         if render and env.render_mode == "human": env.render() 
 
+        if ep == 0:
+            print(f"[DEBUG] Manual Control: {env.unwrapped.config.get('manual_control')}")
+        
         for t in range(max_steps):
             action = epsilon_greedy(Q, state, epsilon=0.0) 
             obs, reward, terminated, truncated, info = env.step(action)
+            
+            if t % 10 == 0:  # Debug every 10 steps
+                veh = env.unwrapped.vehicle
+                print(f"[DEBUG] Ep:{ep+1} St:{t} Act:{action} Spd:{veh.speed:.1f} Lane:{veh.lane_index[2]}")
+                
             state = discretize_state(env)
             total_reward += reward
-            if render and env.render_mode == "human": env.render()
+            if render and env.render_mode == "human": 
+                env.render()
+                import pygame
+                pygame.event.pump()  # FORCE events processing to prevent freezing
             if terminated or truncated: break
 
         episode_rewards.append(total_reward)
@@ -276,7 +292,7 @@ def load_model(path: str) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser(description="Tabular Q-learning")
-    parser.add_argument("--episodes", type=int, default=500, help="Număr episoade")
+    parser.add_argument("--episodes", type=int, default=1000, help="Număr episoade")
     parser.add_argument("--max-steps", type=int, default=2000, help="Pași pe episod")
     parser.add_argument("--alpha", type=float, default=0.1, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
